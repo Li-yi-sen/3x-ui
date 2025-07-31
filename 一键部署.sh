@@ -11,9 +11,10 @@ purple='\033[0;35m'
 plain='\033[0m'
 
 echo -e "${blue}🚀 3X-UI 一键部署工具${plain}"
-echo -e "${yellow}📦 直接从源码编译部署，简单高效${plain}"
-echo -e "${green}🎯 功能: 下载源码 → 安装环境 → 编译安装 → 配置服务 → 启动运行${plain}"
-echo -e "${purple}🔧 自动安装: Go编译环境、Git工具、Nginx服务器${plain}"
+echo -e "${yellow}📦 智能编译部署：源码优先，二进制备用${plain}"
+echo -e "${green}🎯 功能: 环境检查 → 源码编译 → 备用下载 → 服务配置 → 启动运行${plain}"
+echo -e "${purple}🔧 自动安装: Go环境、Git工具、Nginx服务器、系统服务${plain}"
+echo -e "${blue}💡 多重保障: 直连/代理/离线编译 + 预编译二进制备用${plain}"
 echo "======================================"
 
 # 检查root权限
@@ -32,6 +33,31 @@ get_arch() {
 # 检查系统要求
 check_system() {
     echo -e "${purple}🔍 检查系统环境...${plain}"
+    
+    # 检查系统资源
+    echo -e "${yellow}📊 检查系统资源...${plain}"
+    
+    # 检查内存
+    local memory_kb=$(grep MemTotal /proc/meminfo | awk '{print $2}')
+    local memory_mb=$((memory_kb / 1024))
+    echo -e "${blue}💾 内存: ${memory_mb}MB${plain}"
+    
+    if [[ $memory_mb -lt 512 ]]; then
+        echo -e "${red}⚠️ 内存不足 (${memory_mb}MB < 512MB)，编译可能失败${plain}"
+    fi
+    
+    # 检查磁盘空间
+    local disk_space=$(df /opt 2>/dev/null | tail -1 | awk '{print $4}' || echo "0")
+    local disk_space_mb=$((disk_space / 1024))
+    echo -e "${blue}💿 可用磁盘空间: ${disk_space_mb}MB${plain}"
+    
+    if [[ $disk_space_mb -lt 1024 ]]; then
+        echo -e "${red}⚠️ 磁盘空间不足 (${disk_space_mb}MB < 1GB)，安装可能失败${plain}"
+    fi
+    
+    # 检查CPU核心数
+    local cpu_cores=$(nproc)
+    echo -e "${blue}🖥️ CPU核心数: ${cpu_cores}${plain}"
     
     # 检查必要工具
     for tool in wget unzip tar systemctl git; do
@@ -120,6 +146,52 @@ download_project() {
     fi
 }
 
+# 下载备用二进制文件
+download_fallback_binary() {
+    echo -e "${purple}🚨 编译失败，尝试下载原项目的预编译二进制文件...${plain}"
+    
+    local arch=$(get_arch)
+    local binary_urls=(
+        "https://github.com/MHSanaei/3x-ui/releases/latest/download/x-ui-linux-${arch}.tar.gz"
+        "https://github.com/alireza0/x-ui/releases/latest/download/x-ui-linux-${arch}.tar.gz"
+    )
+    
+    for binary_url in "${binary_urls[@]}"; do
+        echo -e "${yellow}尝试下载: $binary_url${plain}"
+        
+        if wget -O fallback-binary.tar.gz "$binary_url" 2>/dev/null; then
+            echo -e "${green}✅ 预编译包下载成功${plain}"
+            
+            # 解压二进制包
+            if tar -xzf fallback-binary.tar.gz 2>/dev/null; then
+                echo -e "${green}✅ 预编译包解压成功${plain}"
+                
+                # 设置权限
+                chmod +x x-ui 2>/dev/null || true
+                if [[ -f "firewall-server" ]]; then
+                    chmod +x firewall-server
+                    mkdir -p web/firewall-server
+                    mv firewall-server web/firewall-server/
+                fi
+                
+                # 清理下载文件
+                rm -f fallback-binary.tar.gz
+                
+                echo -e "${green}✅ 预编译二进制文件安装成功${plain}"
+                return 0
+            else
+                echo -e "${yellow}⚠️ 解压失败，尝试下一个源...${plain}"
+                rm -f fallback-binary.tar.gz
+            fi
+        else
+            echo -e "${yellow}⚠️ 下载失败，尝试下一个源...${plain}"
+        fi
+    done
+    
+    echo -e "${red}❌ 所有预编译包下载失败${plain}"
+    return 1
+}
+
 # 清理临时文件
 cleanup_temp_files() {
     echo -e "${yellow}🧹 清理临时文件...${plain}"
@@ -196,11 +268,11 @@ build_install() {
     if ! command -v git &> /dev/null; then
         echo -e "${red}❌ Git工具未安装，正在安装...${plain}"
         if command -v apt &> /dev/null; then
-            apt update && apt install -y git
+            apt update && apt install -y git ca-certificates curl
         elif command -v yum &> /dev/null; then
-            yum install -y git
+            yum install -y git ca-certificates curl
         elif command -v dnf &> /dev/null; then
-            dnf install -y git
+            dnf install -y git ca-certificates curl
         fi
         
         # 再次验证
@@ -211,6 +283,22 @@ build_install() {
     fi
     
     echo -e "${green}✅ Git工具可用：$(git --version)${plain}"
+    
+    # 网络连通性检查
+    echo -e "${yellow}🌐 检查网络连通性...${plain}"
+    if ping -c 1 8.8.8.8 &> /dev/null; then
+        echo -e "${green}✅ 网络连接正常${plain}"
+    else
+        echo -e "${yellow}⚠️ 网络连接可能有问题${plain}"
+    fi
+    
+    # 测试Go代理连通性
+    echo -e "${yellow}📡 测试Go代理连通性...${plain}"
+    if curl -s --connect-timeout 10 https://goproxy.cn > /dev/null; then
+        echo -e "${green}✅ goproxy.cn 可用${plain}"
+    else
+        echo -e "${yellow}⚠️ goproxy.cn 连接超时${plain}"
+    fi
     
     # 清理模块缓存
     go clean -modcache 2>/dev/null || true
@@ -224,48 +312,91 @@ build_install() {
     export GOOS=linux
     export GOARCH=$(get_arch)
     
-    # 尝试编译，支持重试
-    local max_retries=3
-    local retry_count=0
+    # 尝试不同的编译策略
+    local strategies=("direct" "proxy" "offline")
     
-    while [[ $retry_count -lt $max_retries ]]; do
-        if [[ $retry_count -gt 0 ]]; then
-            echo -e "${yellow}🔄 第 $((retry_count + 1)) 次编译尝试...${plain}"
-            # 清理模块缓存重试
-            go clean -modcache 2>/dev/null || true
-        fi
+    for strategy in "${strategies[@]}"; do
+        echo -e "${purple}🎯 尝试编译策略: $strategy${plain}"
         
-        if go mod tidy && go build -ldflags="-s -w" -o x-ui main.go; then
-            echo -e "${green}✅ 编译成功${plain}"
-            
-            # 创建防火墙服务器二进制
-            if [[ -d "web/firewall-server" ]]; then
-                echo -e "${yellow}编译防火墙服务器...${plain}"
-                cd web/firewall-server
-                if go build -ldflags="-s -w" -o firewall-server main.go; then
-                    echo -e "${green}✅ 防火墙服务器编译成功${plain}"
+        case $strategy in
+            "direct")
+                echo -e "${yellow}使用直连模式编译...${plain}"
+                export GOPROXY=direct
+                export GOSUMDB=off
+                ;;
+            "proxy")
+                echo -e "${yellow}使用代理模式编译...${plain}"
+                export GOPROXY=https://goproxy.cn,https://proxy.golang.org,direct
+                export GOSUMDB=sum.golang.org
+                ;;
+            "offline")
+                echo -e "${yellow}尝试离线编译模式...${plain}"
+                export GOPROXY=off
+                export GOSUMDB=off
+                # 尝试使用vendor目录
+                if [[ -d "vendor" ]]; then
+                    echo -e "${green}发现vendor目录，使用离线依赖${plain}"
+                    export GOFLAGS="-mod=vendor"
                 else
-                    echo -e "${yellow}⚠️ 防火墙服务器编译失败，将跳过${plain}"
+                    echo -e "${yellow}无vendor目录，跳过离线模式${plain}"
+                    continue
                 fi
-                cd ../..
+                ;;
+        esac
+        
+        # 清理缓存
+        go clean -modcache 2>/dev/null || true
+        
+        # 尝试编译
+        local max_retries=2
+        local retry_count=0
+        
+        while [[ $retry_count -lt $max_retries ]]; do
+            if [[ $retry_count -gt 0 ]]; then
+                echo -e "${yellow}🔄 策略 $strategy 第 $((retry_count + 1)) 次尝试...${plain}"
+                sleep 10
             fi
             
-            return 0
-        else
-            ((retry_count++))
-            if [[ $retry_count -lt $max_retries ]]; then
-                echo -e "${yellow}⚠️ 编译失败，30秒后重试 ($retry_count/$max_retries)...${plain}"
-                sleep 30
+            echo -e "${purple}📡 正在下载Go依赖包（策略: $strategy）...${plain}"
+            
+            # 增加超时设置
+            export GOCACHE=/tmp/go-cache
+            export GOTMPDIR=/tmp/go-tmp
+            mkdir -p /tmp/go-cache /tmp/go-tmp
+            
+            if timeout 600 go mod tidy && timeout 900 go build -ldflags="-s -w" -o x-ui main.go; then
+                echo -e "${green}✅ 编译成功（策略: $strategy）${plain}"
+                
+                # 创建防火墙服务器二进制
+                if [[ -d "web/firewall-server" ]]; then
+                    echo -e "${yellow}编译防火墙服务器...${plain}"
+                    cd web/firewall-server
+                    if timeout 300 go build -ldflags="-s -w" -o firewall-server main.go; then
+                        echo -e "${green}✅ 防火墙服务器编译成功${plain}"
+                    else
+                        echo -e "${yellow}⚠️ 防火墙服务器编译失败，将跳过${plain}"
+                    fi
+                    cd ../..
+                fi
+                
+                return 0
+            else
+                ((retry_count++))
+                echo -e "${yellow}⚠️ 策略 $strategy 第 $retry_count 次尝试失败${plain}"
             fi
-        fi
+        done
+        
+        echo -e "${red}❌ 策略 $strategy 编译失败${plain}"
     done
     
-    echo -e "${red}❌ 编译失败，已尝试 $max_retries 次${plain}"
-    echo -e "${yellow}💡 可能的原因：${plain}"
-    echo -e "  - 网络连接问题，无法下载Go依赖包"
-    echo -e "  - 磁盘空间不足"
-    echo -e "  - 内存不足"
-    echo -e "  - Go模块代理服务器问题"
+    echo -e "${red}❌ 所有编译策略均失败${plain}"
+    echo -e "${yellow}💡 建议解决方案：${plain}"
+    echo -e "  1. 检查网络连接：ping 8.8.8.8"
+    echo -e "  2. 检查磁盘空间：df -h"
+    echo -e "  3. 检查内存使用：free -h"
+    echo -e "  4. 手动下载依赖：go mod download"
+    echo -e "  5. 尝试不同网络环境或VPN"
+    
     return 1
 }
 
@@ -465,7 +596,7 @@ start_services() {
 show_result() {
     echo ""
     echo -e "${green}🎉 一键部署完成！${plain}"
-    echo -e "${blue}✨ 优化流程：源码编译，无冗余下载${plain}"
+    echo -e "${blue}✨ 智能部署：多策略编译 + 双重保障${plain}"
     echo "======================================"
     echo -e "${green}📍 网站首页:${plain} http://您的服务器IP"
     echo -e "${green}📊 服务状态:${plain} http://您的服务器IP/status.html"
@@ -499,12 +630,21 @@ main() {
     echo -e "${yellow}🔨 开始编译安装源码包...${plain}"
     if ! build_install; then
         echo -e "${red}❌ 编译安装失败${plain}"
-        echo -e "${yellow}💡 建议解决方案:${plain}"
-        echo -e "  1. 检查网络连接是否正常"
-        echo -e "  2. 确保有足够的磁盘空间和内存"
-        echo -e "  3. 检查Go环境是否正常安装"
-        echo -e "  4. 联系技术支持获取帮助"
-        exit 1
+        echo -e "${blue}🚀 尝试下载预编译的二进制文件...${plain}"
+        
+        if download_fallback_binary; then
+            echo -e "${green}✅ 使用预编译二进制文件成功${plain}"
+        else
+            echo -e "${red}❌ 所有安装方式均失败${plain}"
+            echo -e "${yellow}💡 最终建议解决方案:${plain}"
+            echo -e "  1. 检查网络连接：ping 8.8.8.8"
+            echo -e "  2. 检查磁盘空间：df -h"
+            echo -e "  3. 检查内存使用：free -h"
+            echo -e "  4. 尝试手动编译：go build main.go"
+            echo -e "  5. 联系技术支持获取帮助"
+            echo -e "${purple}📞 技术支持：https://github.com/Li-yi-sen/3x-ui/issues${plain}"
+            exit 1
+        fi
     fi
     
     # 验证关键文件是否存在
