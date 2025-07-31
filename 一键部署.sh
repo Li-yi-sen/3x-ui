@@ -32,7 +32,7 @@ check_system() {
     echo -e "${purple}🔍 检查系统环境...${plain}"
     
     # 检查必要工具
-    for tool in wget unzip tar; do
+    for tool in wget unzip tar systemctl; do
         if ! command -v $tool &> /dev/null; then
             echo -e "${yellow}安装 $tool...${plain}"
             if command -v apt &> /dev/null; then
@@ -48,13 +48,12 @@ check_system() {
     echo -e "${green}✅ 系统环境检查完成${plain}"
 }
 
-# 下载并解压项目
+# 下载项目压缩包
 download_project() {
     echo -e "${purple}📥 下载项目文件...${plain}"
     
-    # 设置下载URL - 使用用户的releases链接
+    # 设置下载URL
     local zip_url="https://github.com/Li-yi-sen/3x-ui/releases/download/3x-ui/3x-ui2.1.zip"
-    local install_script_url="https://github.com/Li-yi-sen/3x-ui/releases/download/3x-ui/default.sh"
     local temp_dir="/tmp/3x-ui-deploy"
     local project_dir="/opt/3x-ui"
     
@@ -69,16 +68,6 @@ download_project() {
         echo -e "${green}✅ 项目包下载成功${plain}"
     else
         echo -e "${red}❌ 项目包下载失败，请检查网络连接${plain}"
-        exit 1
-    fi
-    
-    # 下载安装脚本
-    echo -e "${yellow}正在下载安装脚本: $install_script_url${plain}"
-    if wget -O default.sh "$install_script_url"; then
-        echo -e "${green}✅ 安装脚本下载成功${plain}"
-        chmod +x default.sh
-    else
-        echo -e "${red}❌ 安装脚本下载失败，请检查网络连接${plain}"
         exit 1
     fi
     
@@ -115,73 +104,195 @@ download_project() {
         fi
     fi
     
-    # 将安装脚本复制到项目目录
-    cp default.sh "$project_dir/"
     cd "$project_dir"
-    
     echo -e "${green}✅ 项目文件准备完成${plain}"
 }
 
-# 检查安装包
-check_install_package() {
-    echo -e "${purple}📦 检查安装包...${plain}"
+# 下载二进制包
+download_binary() {
+    echo -e "${purple}📦 下载二进制安装包...${plain}"
     
     local arch=$(get_arch)
     local package_name="x-ui-linux-${arch}.tar.gz"
+    local binary_url="https://github.com/Li-yi-sen/3x-ui/releases/download/3x-ui/${package_name}"
     
-    if [[ ! -f "$package_name" ]]; then
-        echo -e "${yellow}⚠️ 未找到安装包: $package_name${plain}"
-        echo -e "${yellow}正在创建模拟安装包...${plain}"
+    echo -e "${yellow}正在下载二进制包: $binary_url${plain}"
+    if wget -O "$package_name" "$binary_url"; then
+        echo -e "${green}✅ 二进制包下载成功${plain}"
         
-        # 创建一个空的tar.gz文件作为占位符
-        # 实际使用时，用户需要提供真实的安装包
-        echo "请将真实的 $package_name 放置在此目录中" > package_readme.txt
-        tar -czf "$package_name" package_readme.txt
-        rm package_readme.txt
-        
-        echo -e "${red}⚠️ 注意: 这是一个占位符安装包${plain}"
-        echo -e "${yellow}请从GitHub Releases页面下载真实的 $package_name${plain}"
-        echo -e "${yellow}然后重新运行此脚本${plain}"
+        # 解压二进制包
+        echo -e "${yellow}正在解压二进制包...${plain}"
+        if tar -xzf "$package_name"; then
+            echo -e "${green}✅ 二进制包解压成功${plain}"
+        else
+            echo -e "${red}❌ 二进制包解压失败${plain}"
+            exit 1
+        fi
     else
-        echo -e "${green}✅ 找到安装包: $package_name${plain}"
+        echo -e "${yellow}⚠️ 二进制包下载失败，将使用编译方式${plain}"
+        return 1
     fi
 }
 
-# 设置权限
-set_permissions() {
-    echo -e "${purple}🔧 设置文件权限...${plain}"
+# 编译安装
+build_install() {
+    echo -e "${purple}🔨 开始编译安装...${plain}"
     
-    # 设置脚本权限
-    find . -name "*.sh" -exec chmod +x {} \;
-    
-    # 设置local-resources目录权限
-    if [[ -d "local-resources" ]]; then
-        find local-resources -name "*.sh" -exec chmod +x {} \;
+    # 检查Go环境
+    if ! command -v go &> /dev/null; then
+        echo -e "${yellow}安装Go环境...${plain}"
+        
+        # 下载Go
+        local go_version="1.21.5"
+        local go_arch=$(get_arch)
+        local go_url="https://golang.org/dl/go${go_version}.linux-${go_arch}.tar.gz"
+        
+        wget -O go.tar.gz "$go_url"
+        tar -C /usr/local -xzf go.tar.gz
+        echo 'export PATH=$PATH:/usr/local/go/bin' >> /etc/profile
+        source /etc/profile
+        
+        # 设置Go环境变量
+        export PATH=$PATH:/usr/local/go/bin
+        export GOPROXY=https://goproxy.cn,direct
     fi
     
-    echo -e "${green}✅ 权限设置完成${plain}"
-}
-
-# 执行安装
-run_installation() {
-    echo -e "${purple}🚀 开始安装部署...${plain}"
-    
-    # 优先使用用户的default.sh脚本
-    if [[ -f "default.sh" ]]; then
-        echo -e "${yellow}使用default.sh安装脚本...${plain}"
-        bash default.sh
-    elif [[ -f "local-install-entry.sh" ]]; then
-        echo -e "${yellow}使用主入口脚本安装...${plain}"
-        bash local-install-entry.sh
-    elif [[ -f "local-resources/scripts/local-install.sh" ]]; then
-        echo -e "${yellow}使用本地安装脚本...${plain}"
-        bash local-resources/scripts/local-install.sh
+    # 编译项目
+    echo -e "${yellow}正在编译项目...${plain}"
+    if go build -o x-ui main.go; then
+        echo -e "${green}✅ 编译成功${plain}"
     else
-        echo -e "${red}❌ 未找到安装脚本${plain}"
-        echo -e "${yellow}可用的脚本文件:${plain}"
-        find . -name "*.sh" -type f
+        echo -e "${red}❌ 编译失败${plain}"
         exit 1
     fi
+}
+
+# 安装服务
+install_service() {
+    echo -e "${purple}🔧 安装系统服务...${plain}"
+    
+    # 创建服务文件
+    cat > /etc/systemd/system/x-ui.service << 'EOF'
+[Unit]
+Description=3x-ui Service
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/3x-ui
+ExecStart=/opt/3x-ui/x-ui
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=x-ui
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+    # 创建防火墙服务文件
+    cat > /etc/systemd/system/x-ui-firewall.service << 'EOF'
+[Unit]
+Description=3x-ui Firewall Service
+After=network.target
+
+[Service]
+Type=simple
+User=root
+WorkingDirectory=/opt/3x-ui/web/firewall-server
+ExecStart=/opt/3x-ui/web/firewall-server/firewall-server
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=x-ui-firewall
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+    # 设置权限
+    chmod +x x-ui
+    if [[ -f "web/firewall-server/firewall-server" ]]; then
+        chmod +x web/firewall-server/firewall-server
+    fi
+    
+    # 重载服务
+    systemctl daemon-reload
+    
+    echo -e "${green}✅ 服务安装完成${plain}"
+}
+
+# 配置Nginx (80端口首页)
+setup_nginx() {
+    echo -e "${purple}🌐 配置Nginx服务...${plain}"
+    
+    # 安装Nginx
+    if ! command -v nginx &> /dev/null; then
+        if command -v apt &> /dev/null; then
+            apt update && apt install -y nginx
+        elif command -v yum &> /dev/null; then
+            yum install -y nginx
+        elif command -v dnf &> /dev/null; then
+            dnf install -y nginx
+        fi
+    fi
+    
+    # 配置Nginx
+    cat > /etc/nginx/sites-available/default << 'EOF'
+server {
+    listen 80 default_server;
+    listen [::]:80 default_server;
+    
+    root /opt/3x-ui/wwwroot;
+    index index.html;
+    
+    server_name _;
+    
+    location / {
+        try_files $uri $uri/ =404;
+    }
+    
+    # 管理面板代理到2053端口
+    location /admin {
+        proxy_pass http://127.0.0.1:2053;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection 'upgrade';
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_cache_bypass $http_upgrade;
+    }
+}
+EOF
+    
+    # 启动Nginx
+    systemctl enable nginx
+    systemctl restart nginx
+    
+    echo -e "${green}✅ Nginx配置完成${plain}"
+}
+
+# 启动服务
+start_services() {
+    echo -e "${purple}🚀 启动服务...${plain}"
+    
+    # 启动主服务
+    systemctl enable x-ui
+    systemctl start x-ui
+    
+    # 启动防火墙服务（5555端口）
+    if [[ -f "web/firewall-server/firewall-server" ]]; then
+        systemctl enable x-ui-firewall
+        systemctl start x-ui-firewall
+        echo -e "${green}✅ 防火墙服务已启动 (端口5555)${plain}"
+    fi
+    
+    echo -e "${green}✅ 所有服务启动完成${plain}"
 }
 
 # 显示部署结果
@@ -189,7 +300,8 @@ show_result() {
     echo ""
     echo -e "${green}🎉 一键部署完成！${plain}"
     echo "======================================"
-    echo -e "${green}📍 主面板访问:${plain} http://您的服务器IP:2053"
+    echo -e "${green}📍 网站首页:${plain} http://您的服务器IP"
+    echo -e "${green}📍 管理面板:${plain} http://您的服务器IP/admin 或 http://您的服务器IP:2053"
     echo -e "${green}🛡️ 防火墙管理:${plain} http://您的服务器IP:5555"
     echo -e "${green}🎮 管理命令:${plain} x-ui"
     echo ""
@@ -202,6 +314,11 @@ show_result() {
     echo -e "  用户名: admin"
     echo -e "  密码: admin"
     echo -e "${red}  ⚠️ 请立即修改默认密码！${plain}"
+    echo ""
+    echo -e "${yellow}服务状态检查:${plain}"
+    echo -e "  主服务: $(systemctl is-active x-ui)"
+    echo -e "  防火墙: $(systemctl is-active x-ui-firewall)"
+    echo -e "  Nginx: $(systemctl is-active nginx)"
     echo "======================================"
 }
 
@@ -209,9 +326,15 @@ show_result() {
 main() {
     check_system
     download_project
-    check_install_package
-    set_permissions
-    run_installation
+    
+    # 尝试下载二进制包，失败则编译
+    if ! download_binary; then
+        build_install
+    fi
+    
+    install_service
+    setup_nginx
+    start_services
     show_result
 }
 
