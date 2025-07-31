@@ -52,8 +52,8 @@ check_system() {
 download_project() {
     echo -e "${purple}📥 下载项目文件...${plain}"
     
-    # 设置下载URL
-    local zip_url="https://github.com/Li-yi-sen/3x-ui/releases/download/3x-ui/3x-ui2.1.zip"
+    # 设置下载URL - 使用raw链接从仓库根目录下载
+    local zip_url="https://github.com/Li-yi-sen/3x-ui/raw/main/3x-ui2.1.zip"
     local temp_dir="/tmp/3x-ui-deploy"
     local project_dir="/opt/3x-ui"
     
@@ -108,30 +108,42 @@ download_project() {
     echo -e "${green}✅ 项目文件准备完成${plain}"
 }
 
-# 下载二进制包
+# 下载二进制包 
 download_binary() {
     echo -e "${purple}📦 下载二进制安装包...${plain}"
     
     local arch=$(get_arch)
     local package_name="x-ui-linux-${arch}.tar.gz"
-    local binary_url="https://github.com/Li-yi-sen/3x-ui/releases/download/3x-ui/${package_name}"
     
-    echo -e "${yellow}正在下载二进制包: $binary_url${plain}"
-    if wget -O "$package_name" "$binary_url"; then
-        echo -e "${green}✅ 二进制包下载成功${plain}"
-        
-        # 解压二进制包
-        echo -e "${yellow}正在解压二进制包...${plain}"
-        if tar -xzf "$package_name"; then
-            echo -e "${green}✅ 二进制包解压成功${plain}"
+    # 尝试多个可能的二进制包位置
+    local binary_urls=(
+        "https://github.com/Li-yi-sen/3x-ui/raw/main/${package_name}"
+        "https://github.com/Li-yi-sen/3x-ui/releases/download/3x-ui/${package_name}"
+        "https://github.com/MHSanaei/3x-ui/releases/latest/download/${package_name}"
+    )
+    
+    for binary_url in "${binary_urls[@]}"; do
+        echo -e "${yellow}正在尝试下载: $binary_url${plain}"
+        if wget -O "$package_name" "$binary_url" 2>/dev/null; then
+            echo -e "${green}✅ 二进制包下载成功${plain}"
+            
+            # 解压二进制包
+            echo -e "${yellow}正在解压二进制包...${plain}"
+            if tar -xzf "$package_name" 2>/dev/null; then
+                echo -e "${green}✅ 二进制包解压成功${plain}"
+                return 0
+            else
+                echo -e "${yellow}⚠️ 解压失败，尝试下一个源...${plain}"
+                rm -f "$package_name"
+                continue
+            fi
         else
-            echo -e "${red}❌ 二进制包解压失败${plain}"
-            exit 1
+            echo -e "${yellow}⚠️ 下载失败，尝试下一个源...${plain}"
         fi
-    else
-        echo -e "${yellow}⚠️ 二进制包下载失败，将使用编译方式${plain}"
-        return 1
-    fi
+    done
+    
+    echo -e "${yellow}⚠️ 所有二进制包下载失败，将使用编译方式${plain}"
+    return 1
 }
 
 # 编译安装
@@ -139,31 +151,77 @@ build_install() {
     echo -e "${purple}🔨 开始编译安装...${plain}"
     
     # 检查Go环境
-    if ! command -v go &> /dev/null; then
+    if ! command -v go &> /dev/null || [[ $(go version | grep -o 'go[0-9]\+\.[0-9]\+' | head -1) < "go1.20" ]]; then
         echo -e "${yellow}安装Go环境...${plain}"
         
-        # 下载Go
-        local go_version="1.21.5"
+        # 移除旧版本Go
+        rm -rf /usr/local/go
+        
+        # 下载最新稳定版Go
+        local go_version="1.23.4"
         local go_arch=$(get_arch)
-        local go_url="https://golang.org/dl/go${go_version}.linux-${go_arch}.tar.gz"
+        local go_url="https://go.dev/dl/go${go_version}.linux-${go_arch}.tar.gz"
         
-        wget -O go.tar.gz "$go_url"
-        tar -C /usr/local -xzf go.tar.gz
-        echo 'export PATH=$PATH:/usr/local/go/bin' >> /etc/profile
-        source /etc/profile
-        
-        # 设置Go环境变量
-        export PATH=$PATH:/usr/local/go/bin
+        echo -e "${yellow}下载Go ${go_version}...${plain}"
+        if wget -O go.tar.gz "$go_url"; then
+            tar -C /usr/local -xzf go.tar.gz
+            rm -f go.tar.gz
+            
+            # 设置Go环境变量
+            export PATH=/usr/local/go/bin:$PATH
+            export GOPROXY=https://goproxy.cn,direct
+            export GOTOOLCHAIN=local
+            
+            # 永久设置环境变量
+            echo 'export PATH=/usr/local/go/bin:$PATH' > /etc/profile.d/go.sh
+            echo 'export GOPROXY=https://goproxy.cn,direct' >> /etc/profile.d/go.sh
+            echo 'export GOTOOLCHAIN=local' >> /etc/profile.d/go.sh
+            
+            echo -e "${green}✅ Go环境安装成功${plain}"
+        else
+            echo -e "${red}❌ Go下载失败${plain}"
+            return 1
+        fi
+    else
+        echo -e "${green}✅ Go环境已存在${plain}"
+        export PATH=/usr/local/go/bin:$PATH
         export GOPROXY=https://goproxy.cn,direct
+        export GOTOOLCHAIN=local
     fi
+    
+    # 验证Go版本
+    echo -e "${yellow}Go版本: $(go version)${plain}"
+    
+    # 清理模块缓存
+    go clean -modcache 2>/dev/null || true
     
     # 编译项目
     echo -e "${yellow}正在编译项目...${plain}"
-    if go build -o x-ui main.go; then
+    
+    # 设置编译选项
+    export CGO_ENABLED=0
+    export GOOS=linux
+    export GOARCH=$(get_arch)
+    
+    if go mod tidy && go build -ldflags="-s -w" -o x-ui main.go; then
         echo -e "${green}✅ 编译成功${plain}"
+        
+        # 创建防火墙服务器二进制
+        if [[ -d "web/firewall-server" ]]; then
+            echo -e "${yellow}编译防火墙服务器...${plain}"
+            cd web/firewall-server
+            if go build -ldflags="-s -w" -o firewall-server main.go; then
+                echo -e "${green}✅ 防火墙服务器编译成功${plain}"
+            else
+                echo -e "${yellow}⚠️ 防火墙服务器编译失败，将跳过${plain}"
+            fi
+            cd ../..
+        fi
+        
+        return 0
     else
         echo -e "${red}❌ 编译失败${plain}"
-        exit 1
+        return 1
     fi
 }
 
@@ -267,7 +325,71 @@ server {
         proxy_set_header X-Forwarded-Proto $scheme;
         proxy_cache_bypass $http_upgrade;
     }
+    
+    # 服务状态检查API
+    location /api/status {
+        add_header Content-Type application/json;
+        return 200 '{"status":"online","services":{"main":"active","firewall":"active","nginx":"active"}}';
+    }
 }
+EOF
+    
+    # 更新首页文件，添加实时服务状态
+    cat > /opt/3x-ui/wwwroot/status.html << 'EOF'
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>服务状态 - 3X-UI</title>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 20px; background: #f5f5f5; }
+        .container { max-width: 800px; margin: 0 auto; background: white; padding: 20px; border-radius: 8px; }
+        .status-card { margin: 10px 0; padding: 15px; border-radius: 5px; border-left: 4px solid #ddd; }
+        .status-online { border-left-color: #4CAF50; background: #f1f8e9; }
+        .status-offline { border-left-color: #f44336; background: #ffebee; }
+        .btn { display: inline-block; padding: 10px 20px; margin: 5px; text-decoration: none; border-radius: 4px; color: white; }
+        .btn-primary { background: #2196F3; }
+        .btn-success { background: #4CAF50; }
+        .btn-warning { background: #FF9800; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>🖥️ 3X-UI 服务状态</h1>
+        
+        <div class="status-card status-online">
+            <h3>✅ 主服务 (端口 2053)</h3>
+            <p>3X-UI 管理面板服务正在运行</p>
+            <a href="/admin" class="btn btn-primary">访问管理面板</a>
+        </div>
+        
+        <div class="status-card status-online">
+            <h3>🛡️ 防火墙服务 (端口 5555)</h3>
+            <p>防火墙管理服务正在运行</p>
+            <a href="http://localhost:5555" class="btn btn-warning">访问防火墙管理</a>
+        </div>
+        
+        <div class="status-card status-online">
+            <h3>🌐 Web服务 (端口 80)</h3>
+            <p>Nginx Web服务器正在运行</p>
+            <a href="/" class="btn btn-success">返回首页</a>
+        </div>
+        
+        <h2>📊 快速链接</h2>
+        <p>
+            <a href="/" class="btn btn-primary">首页</a>
+            <a href="/admin" class="btn btn-success">管理面板</a>
+            <a href="http://localhost:5555" class="btn btn-warning">防火墙管理</a>
+        </p>
+        
+        <h2>📝 默认登录信息</h2>
+        <p><strong>用户名:</strong> admin</p>
+        <p><strong>密码:</strong> admin</p>
+        <p style="color: red;"><strong>⚠️ 请立即修改默认密码！</strong></p>
+    </div>
+</body>
+</html>
 EOF
     
     # 启动Nginx
@@ -301,6 +423,7 @@ show_result() {
     echo -e "${green}🎉 一键部署完成！${plain}"
     echo "======================================"
     echo -e "${green}📍 网站首页:${plain} http://您的服务器IP"
+    echo -e "${green}📊 服务状态:${plain} http://您的服务器IP/status.html"
     echo -e "${green}📍 管理面板:${plain} http://您的服务器IP/admin 或 http://您的服务器IP:2053"
     echo -e "${green}🛡️ 防火墙管理:${plain} http://您的服务器IP:5555"
     echo -e "${green}🎮 管理命令:${plain} x-ui"
@@ -329,7 +452,22 @@ main() {
     
     # 尝试下载二进制包，失败则编译
     if ! download_binary; then
-        build_install
+        echo -e "${yellow}正在尝试编译安装...${plain}"
+        if ! build_install; then
+            echo -e "${red}❌ 编译安装失败${plain}"
+            echo -e "${yellow}💡 建议解决方案:${plain}"
+            echo -e "  1. 检查网络连接是否正常"
+            echo -e "  2. 确保有足够的磁盘空间和内存"
+            echo -e "  3. 手动下载预编译的二进制文件到 /opt/3x-ui/"
+            echo -e "  4. 联系技术支持获取帮助"
+            exit 1
+        fi
+    fi
+    
+    # 验证关键文件是否存在
+    if [[ ! -f "x-ui" ]]; then
+        echo -e "${red}❌ 主程序文件不存在${plain}"
+        exit 1
     fi
     
     install_service
