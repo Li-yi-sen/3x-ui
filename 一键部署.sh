@@ -11,7 +11,8 @@ purple='\033[0;35m'
 plain='\033[0m'
 
 echo -e "${blue}🚀 3X-UI 一键部署工具${plain}"
-echo -e "${yellow}📦 支持releases压缩包下载和自动部署${plain}"
+echo -e "${yellow}📦 直接从源码编译部署，简单高效${plain}"
+echo -e "${green}🎯 功能: 下载源码 → 编译安装 → 配置服务 → 启动运行${plain}"
 echo "======================================"
 
 # 检查root权限
@@ -105,50 +106,39 @@ download_project() {
     fi
     
     cd "$project_dir"
-    echo -e "${green}✅ 项目文件准备完成${plain}"
+    
+    # 验证项目结构
+    if [[ -f "main.go" ]]; then
+        echo -e "${green}✅ 项目文件准备完成，找到main.go${plain}"
+    else
+        echo -e "${yellow}⚠️ 未找到main.go，检查项目结构...${plain}"
+        ls -la
+    fi
 }
 
-# 下载二进制包 
-download_binary() {
-    echo -e "${purple}📦 下载二进制安装包...${plain}"
+# 清理临时文件
+cleanup_temp_files() {
+    echo -e "${yellow}🧹 清理临时文件...${plain}"
     
-    local arch=$(get_arch)
-    local package_name="x-ui-linux-${arch}.tar.gz"
+    # 只在/opt/3x-ui目录中清理
+    if [[ "$(pwd)" == "/opt/3x-ui" ]]; then
+        rm -f go.tar.gz *.tar.gz 2>/dev/null || true
+        echo -e "${green}✅ 临时文件清理完成${plain}"
+    fi
     
-    # 尝试多个可能的二进制包位置
-    local binary_urls=(
-        "https://github.com/Li-yi-sen/3x-ui/raw/main/${package_name}"
-        "https://github.com/Li-yi-sen/3x-ui/releases/download/3x-ui/${package_name}"
-        "https://github.com/MHSanaei/3x-ui/releases/latest/download/${package_name}"
-    )
-    
-    for binary_url in "${binary_urls[@]}"; do
-        echo -e "${yellow}正在尝试下载: $binary_url${plain}"
-        if wget -O "$package_name" "$binary_url" 2>/dev/null; then
-            echo -e "${green}✅ 二进制包下载成功${plain}"
-            
-            # 解压二进制包
-            echo -e "${yellow}正在解压二进制包...${plain}"
-            if tar -xzf "$package_name" 2>/dev/null; then
-                echo -e "${green}✅ 二进制包解压成功${plain}"
-                return 0
-            else
-                echo -e "${yellow}⚠️ 解压失败，尝试下一个源...${plain}"
-                rm -f "$package_name"
-                continue
-            fi
-        else
-            echo -e "${yellow}⚠️ 下载失败，尝试下一个源...${plain}"
-        fi
-    done
-    
-    echo -e "${yellow}⚠️ 所有二进制包下载失败，将使用编译方式${plain}"
-    return 1
+    # 清理/tmp目录
+    rm -rf /tmp/3x-ui-deploy 2>/dev/null || true
 }
 
 # 编译安装
 build_install() {
     echo -e "${purple}🔨 开始编译安装...${plain}"
+    
+    # 确保在项目目录中
+    if [[ ! -f "main.go" ]]; then
+        echo -e "${red}❌ 未找到main.go文件，请确保在项目根目录${plain}"
+        return 1
+    fi
     
     # 检查Go环境
     if ! command -v go &> /dev/null || [[ $(go version | grep -o 'go[0-9]\+\.[0-9]\+' | head -1) < "go1.20" ]]; then
@@ -421,6 +411,7 @@ start_services() {
 show_result() {
     echo ""
     echo -e "${green}🎉 一键部署完成！${plain}"
+    echo -e "${blue}✨ 优化流程：源码编译，无冗余下载${plain}"
     echo "======================================"
     echo -e "${green}📍 网站首页:${plain} http://您的服务器IP"
     echo -e "${green}📊 服务状态:${plain} http://您的服务器IP/status.html"
@@ -450,18 +441,16 @@ main() {
     check_system
     download_project
     
-    # 尝试下载二进制包，失败则编译
-    if ! download_binary; then
-        echo -e "${yellow}正在尝试编译安装...${plain}"
-        if ! build_install; then
-            echo -e "${red}❌ 编译安装失败${plain}"
-            echo -e "${yellow}💡 建议解决方案:${plain}"
-            echo -e "  1. 检查网络连接是否正常"
-            echo -e "  2. 确保有足够的磁盘空间和内存"
-            echo -e "  3. 手动下载预编译的二进制文件到 /opt/3x-ui/"
-            echo -e "  4. 联系技术支持获取帮助"
-            exit 1
-        fi
+    # 直接编译安装，不下载额外的二进制包
+    echo -e "${yellow}🔨 开始编译安装源码包...${plain}"
+    if ! build_install; then
+        echo -e "${red}❌ 编译安装失败${plain}"
+        echo -e "${yellow}💡 建议解决方案:${plain}"
+        echo -e "  1. 检查网络连接是否正常"
+        echo -e "  2. 确保有足够的磁盘空间和内存"
+        echo -e "  3. 检查Go环境是否正常安装"
+        echo -e "  4. 联系技术支持获取帮助"
+        exit 1
     fi
     
     # 验证关键文件是否存在
@@ -473,11 +462,12 @@ main() {
     install_service
     setup_nginx
     start_services
+    cleanup_temp_files
     show_result
 }
 
 # 错误处理
-trap 'echo -e "\n${red}❌ 部署过程中出现错误，正在清理...${plain}"; rm -rf /tmp/3x-ui-deploy; exit 1' ERR
+trap 'echo -e "\n${red}❌ 部署过程中出现错误，正在清理...${plain}"; rm -rf /tmp/3x-ui-deploy; cleanup_temp_files 2>/dev/null || true; exit 1' ERR
 
 # 开始执行
 main "$@" 
