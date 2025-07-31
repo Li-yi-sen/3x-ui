@@ -12,7 +12,8 @@ plain='\033[0m'
 
 echo -e "${blue}🚀 3X-UI 一键部署工具${plain}"
 echo -e "${yellow}📦 直接从源码编译部署，简单高效${plain}"
-echo -e "${green}🎯 功能: 下载源码 → 编译安装 → 配置服务 → 启动运行${plain}"
+echo -e "${green}🎯 功能: 下载源码 → 安装环境 → 编译安装 → 配置服务 → 启动运行${plain}"
+echo -e "${purple}🔧 自动安装: Go编译环境、Git工具、Nginx服务器${plain}"
 echo "======================================"
 
 # 检查root权限
@@ -33,7 +34,7 @@ check_system() {
     echo -e "${purple}🔍 检查系统环境...${plain}"
     
     # 检查必要工具
-    for tool in wget unzip tar systemctl; do
+    for tool in wget unzip tar systemctl git; do
         if ! command -v $tool &> /dev/null; then
             echo -e "${yellow}安装 $tool...${plain}"
             if command -v apt &> /dev/null; then
@@ -42,6 +43,9 @@ check_system() {
                 yum install -y $tool
             elif command -v dnf &> /dev/null; then
                 dnf install -y $tool
+            else
+                echo -e "${red}❌ 无法安装 $tool，请手动安装${plain}"
+                exit 1
             fi
         fi
     done
@@ -157,62 +161,112 @@ build_install() {
             tar -C /usr/local -xzf go.tar.gz
             rm -f go.tar.gz
             
-            # 设置Go环境变量
-            export PATH=/usr/local/go/bin:$PATH
-            export GOPROXY=https://goproxy.cn,direct
-            export GOTOOLCHAIN=local
+                         # 设置Go环境变量
+             export PATH=/usr/local/go/bin:$PATH
+             export GOPROXY=https://goproxy.cn,https://proxy.golang.org,direct
+             export GOSUMDB=sum.golang.org
+             export GOTOOLCHAIN=local
+             export GO111MODULE=on
             
-            # 永久设置环境变量
-            echo 'export PATH=/usr/local/go/bin:$PATH' > /etc/profile.d/go.sh
-            echo 'export GOPROXY=https://goproxy.cn,direct' >> /etc/profile.d/go.sh
-            echo 'export GOTOOLCHAIN=local' >> /etc/profile.d/go.sh
+                         # 永久设置环境变量
+             echo 'export PATH=/usr/local/go/bin:$PATH' > /etc/profile.d/go.sh
+             echo 'export GOPROXY=https://goproxy.cn,https://proxy.golang.org,direct' >> /etc/profile.d/go.sh
+             echo 'export GOSUMDB=sum.golang.org' >> /etc/profile.d/go.sh
+             echo 'export GOTOOLCHAIN=local' >> /etc/profile.d/go.sh
+             echo 'export GO111MODULE=on' >> /etc/profile.d/go.sh
             
             echo -e "${green}✅ Go环境安装成功${plain}"
         else
             echo -e "${red}❌ Go下载失败${plain}"
             return 1
         fi
-    else
-        echo -e "${green}✅ Go环境已存在${plain}"
-        export PATH=/usr/local/go/bin:$PATH
-        export GOPROXY=https://goproxy.cn,direct
-        export GOTOOLCHAIN=local
-    fi
+         else
+         echo -e "${green}✅ Go环境已存在${plain}"
+         export PATH=/usr/local/go/bin:$PATH
+         export GOPROXY=https://goproxy.cn,https://proxy.golang.org,direct
+         export GOSUMDB=sum.golang.org
+         export GOTOOLCHAIN=local
+         export GO111MODULE=on
+     fi
     
     # 验证Go版本
     echo -e "${yellow}Go版本: $(go version)${plain}"
+    
+    # 验证Git工具
+    if ! command -v git &> /dev/null; then
+        echo -e "${red}❌ Git工具未安装，正在安装...${plain}"
+        if command -v apt &> /dev/null; then
+            apt update && apt install -y git
+        elif command -v yum &> /dev/null; then
+            yum install -y git
+        elif command -v dnf &> /dev/null; then
+            dnf install -y git
+        fi
+        
+        # 再次验证
+        if ! command -v git &> /dev/null; then
+            echo -e "${red}❌ Git安装失败，编译无法继续${plain}"
+            return 1
+        fi
+    fi
+    
+    echo -e "${green}✅ Git工具可用：$(git --version)${plain}"
     
     # 清理模块缓存
     go clean -modcache 2>/dev/null || true
     
     # 编译项目
     echo -e "${yellow}正在编译项目...${plain}"
+    echo -e "${purple}📡 正在下载Go依赖包，请稍等...${plain}"
     
     # 设置编译选项
     export CGO_ENABLED=0
     export GOOS=linux
     export GOARCH=$(get_arch)
     
-    if go mod tidy && go build -ldflags="-s -w" -o x-ui main.go; then
-        echo -e "${green}✅ 编译成功${plain}"
-        
-        # 创建防火墙服务器二进制
-        if [[ -d "web/firewall-server" ]]; then
-            echo -e "${yellow}编译防火墙服务器...${plain}"
-            cd web/firewall-server
-            if go build -ldflags="-s -w" -o firewall-server main.go; then
-                echo -e "${green}✅ 防火墙服务器编译成功${plain}"
-            else
-                echo -e "${yellow}⚠️ 防火墙服务器编译失败，将跳过${plain}"
-            fi
-            cd ../..
+    # 尝试编译，支持重试
+    local max_retries=3
+    local retry_count=0
+    
+    while [[ $retry_count -lt $max_retries ]]; do
+        if [[ $retry_count -gt 0 ]]; then
+            echo -e "${yellow}🔄 第 $((retry_count + 1)) 次编译尝试...${plain}"
+            # 清理模块缓存重试
+            go clean -modcache 2>/dev/null || true
         fi
         
-        return 0
-    else
-        echo -e "${red}❌ 编译失败${plain}"
-        return 1
-    fi
+        if go mod tidy && go build -ldflags="-s -w" -o x-ui main.go; then
+            echo -e "${green}✅ 编译成功${plain}"
+            
+            # 创建防火墙服务器二进制
+            if [[ -d "web/firewall-server" ]]; then
+                echo -e "${yellow}编译防火墙服务器...${plain}"
+                cd web/firewall-server
+                if go build -ldflags="-s -w" -o firewall-server main.go; then
+                    echo -e "${green}✅ 防火墙服务器编译成功${plain}"
+                else
+                    echo -e "${yellow}⚠️ 防火墙服务器编译失败，将跳过${plain}"
+                fi
+                cd ../..
+            fi
+            
+            return 0
+        else
+            ((retry_count++))
+            if [[ $retry_count -lt $max_retries ]]; then
+                echo -e "${yellow}⚠️ 编译失败，30秒后重试 ($retry_count/$max_retries)...${plain}"
+                sleep 30
+            fi
+        fi
+    done
+    
+    echo -e "${red}❌ 编译失败，已尝试 $max_retries 次${plain}"
+    echo -e "${yellow}💡 可能的原因：${plain}"
+    echo -e "  - 网络连接问题，无法下载Go依赖包"
+    echo -e "  - 磁盘空间不足"
+    echo -e "  - 内存不足"
+    echo -e "  - Go模块代理服务器问题"
+    return 1
 }
 
 # 安装服务
@@ -466,8 +520,17 @@ main() {
     show_result
 }
 
+# 清理函数（在脚本开始时定义）
+cleanup_on_error() {
+    echo -e "\n${red}❌ 部署过程中出现错误，正在清理...${plain}"
+    rm -rf /tmp/3x-ui-deploy 2>/dev/null || true
+    if [[ "$(pwd)" == "/opt/3x-ui" ]]; then
+        rm -f go.tar.gz *.tar.gz 2>/dev/null || true
+    fi
+}
+
 # 错误处理
-trap 'echo -e "\n${red}❌ 部署过程中出现错误，正在清理...${plain}"; rm -rf /tmp/3x-ui-deploy; cleanup_temp_files 2>/dev/null || true; exit 1' ERR
+trap 'cleanup_on_error; exit 1' ERR
 
 # 开始执行
 main "$@" 
